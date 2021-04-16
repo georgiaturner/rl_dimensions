@@ -1,0 +1,220 @@
+% %%
+% clear all
+% close all
+% clc
+
+% model parameters
+ns     = 3;                       % number of model simulations
+alpha  = 0.3;                     % learning rate
+zeta   = 0.1;                     % learning noise
+beta   = 0.8;                     % softmax inverse temperature
+action_policy = "softmax";        % "softmax" or "argmax" or "random"
+attentional_focus = "random_dim"; %Determines attentional focus for unidimensional model. 
+                                %random_dim = randomly sampled,
+                                %relevant_dim = the correct dimension 
+                                
+% task parameters
+nb = 1050;      % Number of blocks. 
+nt = 16;        % trials
+
+%import file
+load('blocks_info.mat');              %Blocks info
+
+% Now get model to play task
+
+for ib = 1:nb
+    ib
+
+    % ///
+    % Feature-based unidimensional RL model
+    rt = zeros(1,nt,ns);    % one response per trial per simulation
+    qt = nan(2,nt+1,ns);    % 2 features (on same dimension) to learn each block
+    qt(:,1,:) = 50;         % Initialise all expected values to 50
+    v1 = zeros(1,nt,ns);    % values of each stimulus, left stimulus = v1
+    v2 = zeros(1,nt,ns);
+    v = zeros(1,nt,ns);     % rewards
+    
+    if attentional_focus == "random_dim"
+        att_dim = randsample(3,1); %Randomly sample the attended dimension for this block
+                %Keep the following while loop if you want to make sure the
+                %attended dimension is WRONG
+        while att_dim == cdim(ib)
+            att_dim = randsample(3,1); %Keep changing attended dimension until it's NOT the correct one
+        end
+    end
+    
+    for it = 1:nt
+        
+        % 1/ CHOICE
+        if it == 1
+            %choose randomly
+            rt(1,it,:) = 1+(rand(1,1,ns) < 0.5);
+        else
+            % Compute values of stimuli
+            stim1 = dims(cdim(ib),1,ib,it);       %find out feature on relevant dimension on stimulus 1
+            if attentional_focus == "random_dim"  %If paying attention to random rather than correct dimension
+                stim1 = dims(att_dim,1,ib,it);   
+            end
+            if stim1 == 1   %If feature 1 is on stim 1, value of stim 1 (v1) = q-value of feature 1
+                v1(1,it,:) = qt(1,it,:);    
+                v2(1,it,:) = qt(2,it,:);
+            elseif stim1 == 2
+                v1(1,it,:) = qt(2,it,:);
+                v2(1,it,:) = qt(1,it,:);
+            end
+            
+            %softmax
+            if action_policy == "softmax"
+                prob = 1/(1+exp(-beta*(bsxfun(@minus,v1(1,it,:),v2(1,it,:)))));
+                rt(1,it,:) = 1+(rand > prob);
+            elseif action_policy == "argmax"
+                rt(1,it,:) = 1 + (v2(1,it,:)>v1(1,it,:));
+            else %if action_policy == "random"
+                rt(1,it,:) = 1+(rand(1,1,ns) < 0.5);
+            end
+        end
+        
+        % 2/ LEARNING
+        
+        %Get reward for this trial
+        v(1,it,:) = (rt(1,it,:) == accurate_symbols(1,ib,it)).*rewards_high(1,ib,it) + (rt(1,it,:) ~= accurate_symbols(1,ib,it)).*rewards_low(1,ib,it);
+        %Get which symbol they chose
+        chosen_stim = rt(1,it,:); 
+        
+        chosen_stims_uni(ib,it,:) = chosen_stim; %Storing patterns of choices for use in later data plotting
+        features_chosen = nan(3,ns);
+        
+        chosen_feature = nan(1,ns);
+        for is = 1:ns
+            %Get feature on relevant dimension of chosen stimulus
+            chosen_feature(1,is) = dims(cdim(ib),chosen_stim(1,1,is),ib,it);
+            if attentional_focus == "random_dim"    %If paying attention to random dimension rather than correct dimension
+                chosen_feature(1,is) = dims(att_dim,chosen_stim(1,1,is),ib,it);
+            end
+
+            %Get list of chosen features for use in later plotting
+            %patterns of choices
+            features_chosen(:,is) = dims(:,chosen_stim(1,1,is),ib,it); 
+            chosen_features_uni(:,ib,it,is) = stim_to_features(features_chosen(:,is));
+
+            %Get prediction error
+            if chosen_feature(1,is) == 1  %Compare to q-value of feature 1 if that feature was on chosen stimulus
+                e = v(1,it,is) - qt(1,it,is);
+            else
+                e = v(1,it,is) - qt(2,it,is);
+            end
+            %Update q-value for chosen feature, q-value for unchosen feature
+            %carried forward to next trial
+            qt(chosen_feature(1,is),it+1,is) = qt(chosen_feature(1,is),it,is) + e*(alpha+zeta*randn(1));
+            qt(3-chosen_feature(1,is),it+1,is) = qt(3-chosen_feature(1,is),it,is);
+
+        end
+        
+        %Gather data to plot trial-by-trial q-values of correct vs incorrect features
+        correct_feature = dims(cdim(ib),accurate_symbols(1,ib,it),ib,it);
+        qt_corr_uni(ib,it,:) = qt(correct_feature,it,:);
+        qt_incor_uni(ib,it,:) = qt(3-correct_feature,it,:);
+        qt_meancor_uni = mean(qt_corr_uni,3);  %Averaging q-value across all simulations for plotting
+        qt_meanincor_uni = mean(qt_incor_uni,3);    %Q-values for correct vs incorrect features
+    end
+    
+    % Gather data to plot trial-by-trial performance
+    correct_uni(ib,:,:) = rt==squeeze(accurate_symbols(1,ib,:))';
+    pcor_uni(ib,:) = mean(correct_uni(ib,:,:),3);
+    
+    %Gather data to plot trial-by-trial value differences between the 2
+    %stimuli.
+    vdiffs_uni(ib,:,:) = abs(bsxfun(@minus,v1(1,:,:),v2(1,:,:))); %absolute value diff between stimuli
+    vdiffs_mean_uni(ib,:) = mean(vdiffs_uni(ib,:,:),3);
+    
+    %Gather rewards data
+    rewds_uni(ib,:,:) = v;
+
+    % ///
+    % Feature-based multidimensional RL model
+    rt = zeros(1,nt,ns);    % one response per trial per simulation
+    qt = nan(6,nt+1,ns);    % 3 features x 2 dims = 6 features to learn each block
+    qt(:,1,:) = 50;         % Initialise all expected values to 50
+    v1 = zeros(1,nt,ns);    % values of each stimulus, left stimulus = v1
+    v2 = zeros(1,nt,ns);
+    v = zeros(1,nt,ns);     % rewards
+    
+    for it = 1:nt
+        
+        % 1/ CHOICE
+        if it == 1
+            %choose randomly
+            rt(1,it,:) = 1+(rand(1,1,ns) < 0.5);
+        else
+            % Compute values of stimuli
+                
+            stim1 = dims(:,1,ib,it);    %find out features on stimulus 1
+            stimulus1 = stim_to_features(stim1);
+            %get values of stimuli
+            v1(1,it,:) = sum(qt(stimulus1==1,it,:))/3;    %Value of stimulus 1 = sum of q values of all features on stim1
+            v2(1,it,:) = sum(qt(stimulus1==0,it,:))/3;
+                        % Divided it by three to normalise, as values in multidim model come
+                        % from summing 3 different q-values
+            %softmax
+            if action_policy == "softmax"
+                prob = 1/(1+exp(-beta*(bsxfun(@minus,v1(1,it,:),v2(1,it,:)))));
+                rt(1,it,:) = 1+(rand > prob);
+            elseif action_policy == "argmax"
+                rt(1,it,:) = 1 + (v2(1,it,:)>v1(1,it,:));
+            else %if action_policy == "random"
+                rt(1,it,:) = 1+(rand(1,1,ns) < 0.5);
+            end
+        end
+            
+        % 2/ LEARNING
+        
+        %Get reward for this trial
+        v(1,it,:) = (rt(1,it,:) == accurate_symbols(1,ib,it)).*rewards_high(1,ib,it) + (rt(1,it,:) ~= accurate_symbols(1,ib,it)).*rewards_low(1,ib,it);
+        %Get which symbol they chose
+        chosen_stim = rt(1,it,:); 
+        
+        chosen_stims_dim(ib,it,:) = chosen_stim; %Storing patterns of choices for use in later data plotting
+        
+        
+        %Get prediction error
+        features_chosen = nan(3,ns);
+        
+        for is = 1:ns
+            %find features of chosen stimulus in error matrix
+            features_chosen(:,is) = dims(:,chosen_stim(1,1,is),ib,it); 
+            error = stim_to_features(features_chosen(:,is));
+            chosen_features_dim(:,ib,it,is) = error; %Recording chosen features for use in later plotting patterns of choices
+            %Get prediction error
+            e = bsxfun(@minus,squeeze(v(1,it,is)),qt(error==1,it,is));
+            error(error==1) = e;
+            %Update q with prediction errors
+            qt(:,it+1,is) = bsxfun(@plus,qt(:,it,is),error.*(alpha+zeta*randn(1)));
+        end
+        
+        %Gather data to plot trial-by-trial Q-values of correct v incorrect
+        %features
+        
+        feature_correct = features1_to_6(cdim(ib),correct_feature);
+        feature_incorrect = features1_to_6(cdim(ib),3-correct_feature);
+
+        qt_corr_dim(ib,it,:) = qt(feature_correct,it,:);    %Q-value for correct feature
+        qt_incor_dim(ib,it,:) = qt(feature_incorrect,it,:); %Q for incorrect feature, correct dimension
+        qt_irrel_dim(:,ib,it,:) = qt(~or((1:6)==feature_correct,(1:6)==feature_incorrect),it,:); %Q-values for incorrect features
+        qt_meancor_dim(ib,it) = mean(qt_corr_dim(ib,it,:),3);  %Averaging q-value across all simulations for plotting
+        qt_meanincor_dim(ib,it) = mean(qt_incor_dim(ib,it,:),3);    %Q-values for correct vs incorrect vs irrelevant features
+        qt_meanirrel_dim(:,ib,it) = mean(qt_irrel_dim(:,ib,it,:),4);
+
+    end
+    
+     % Gather data to plot trial-by-trial performance
+     correct_dim(ib,:,:) = rt==squeeze(accurate_symbols(1,ib,:))';
+     pcor_dim(ib,:) = mean(correct_dim(ib,:,:),3);
+     
+     %Gather data to plot trial-by-trial value differences between the 2 stimuli.
+     vdiffs_dim(ib,:,:) = abs(bsxfun(@minus,v1(1,:,:),v2(1,:,:))); %absolute value diff between stimuli
+     vdiffs_mean_dim(ib,:) = mean(vdiffs_dim(ib,:,:),3);
+     
+     %Gather rewards data
+     rewds_dim(ib,:,:) = v;
+
+end
